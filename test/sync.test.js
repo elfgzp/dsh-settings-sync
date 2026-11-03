@@ -490,3 +490,107 @@ describe('redaction is one-way', () => {
     }
   })
 })
+
+describe('cross-machine profile manifest merge', () => {
+  it('keeps local path specs and drops uninstalled bundles', async () => {
+    const { mergeManifest } = await import('../lib/manifest.js')
+    const incoming = {
+      name: 'dsh-profile-desktop',
+      dependencies: {
+        'dsh-godot-live': 'link:/Users/gzp/Github/dsh-godot-live', // macOS-only path
+        'dsh-chrome-use': '0.4.1',                                  // portable
+        dshmarket: '^1.73.8',
+      },
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', 'dsh-chrome-use', 'dsh-godot-live'] } },
+    }
+    const local = {
+      name: 'dsh-profile-web',
+      dependencies: {
+        'dsh-gongfeng-mr': 'link:/data/home/elfguan/Work/dsh-gongfeng-mr', // Linux-only path
+        'dsh-settings-sync': 'github:elfgzp/dsh-settings-sync',
+      },
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', 'dsh-gongfeng-mr'] } },
+    }
+    const merged = mergeManifest({
+      incoming,
+      local,
+      installed: ['dsh-gongfeng-mr', 'dsh-settings-sync', 'dsh-chrome-use'],
+    })
+
+    // Local paths survive verbatim: they are the specs that resolve here.
+    assert.equal(merged.manifest.dependencies['dsh-gongfeng-mr'], 'link:/data/home/elfguan/Work/dsh-gongfeng-mr')
+    // The remote's path spec never lands on this machine.
+    assert.equal(merged.manifest.dependencies['dsh-godot-live'], undefined)
+    // Portable specs come from the snapshot.
+    assert.equal(merged.manifest.dependencies['dsh-chrome-use'], '0.4.1')
+    // A local-only dependency is kept so it is not silently uninstalled.
+    assert.equal(merged.manifest.dependencies['dsh-settings-sync'], 'github:elfgzp/dsh-settings-sync')
+    // The local profile name wins.
+    assert.equal(merged.manifest.name, 'dsh-profile-web')
+
+    const bundles = merged.manifest.dsh.profile.bundles
+    assert.ok(bundles.includes('dsh-chrome-use'))
+    assert.ok(bundles.includes('dsh-gongfeng-mr'), 'an installed local bundle is kept')
+    assert.ok(!bundles.includes('dsh-godot-live'), 'an uninstalled bundle is skipped')
+    assert.ok(merged.notes.some((note) => note.includes('dsh-godot-live')))
+  })
+
+  it('drops path specs onto a genuinely fresh machine', async () => {
+    const { mergeManifest } = await import('../lib/manifest.js')
+    const merged = mergeManifest({
+      incoming: {
+        dependencies: { a: 'link:/other/machine/a', b: '^1.0.0' },
+        dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', 'a', 'b'] } },
+      },
+      local: undefined,
+      // Nothing installed yet on a fresh machine beyond the in-box bundles.
+      installed: [],
+    })
+    // The path spec is dropped; the portable one is recorded so a later
+    // `pnpm install` would fetch it.
+    assert.equal(merged.manifest.dependencies.a, undefined)
+    assert.equal(merged.manifest.dependencies.b, '^1.0.0')
+    // But neither bundle is enabled: `a` is a foreign path and `b` is not on disk
+    // yet, and a bundle whose package is missing cannot activate.
+    assert.deepEqual(merged.manifest.dsh.profile.bundles, ['@deepseek-ai/dsh-base'])
+  })
+
+  it('a real pull over a foreign profile never breaks bundle resolution', async () => {
+    const world = await buildWorld()
+    try {
+      // Pretend the snapshot came from another machine: absolute paths that do
+      // not exist here, plus a plugin this machine does not have.
+      await writeFile(join(world.profileDir, 'package.json'), `${JSON.stringify({
+        name: 'dsh-profile-desktop',
+        dependencies: {
+          'dsh-settings-sync': 'link:/Users/gzp/Work/Github/dsh-settings-sync',
+          'dsh-chrome-use': '0.4.1',
+        },
+        dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', 'dsh-settings-sync', 'dsh-chrome-use'] } },
+      }, null, 2)}\n`)
+      const state = new StateStore(world.config.stateDir)
+      await state.writeUserConfig({ repoUrl: world.remoteDir, gitName: 'T', gitEmail: 't@e.com' })
+      const engine = new SyncEngine({ config: world.config, state })
+      await engine.push({})
+
+      // Local machine has its own plugin and no dsh-chrome-use.
+      await mkdir(join(world.profileDir, 'node_modules', 'dsh-gongfeng-mr'), { recursive: true })
+      await writeFile(join(world.profileDir, 'package.json'), `${JSON.stringify({
+        name: 'dsh-profile-web',
+        dependencies: { 'dsh-gongfeng-mr': 'link:/data/home/elfguan/Work/dsh-gongfeng-mr' },
+        dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', 'dsh-gongfeng-mr'] } },
+      }, null, 2)}\n`)
+
+      const pulled = await engine.pull({ mode: 'overwrite' })
+      const after = JSON.parse(await readFile(join(world.profileDir, 'package.json'), 'utf8'))
+
+      assert.equal(after.name, 'dsh-profile-web')
+      assert.equal(after.dependencies['dsh-gongfeng-mr'], 'link:/data/home/elfguan/Work/dsh-gongfeng-mr')
+      assert.ok(!after.dsh.profile.bundles.includes('dsh-chrome-use'), 'uninstalled bundle was skipped')
+      assert.ok(after.dsh.profile.bundles.includes('dsh-gongfeng-mr'))
+      assert.ok(pulled.notes.some((note) => note.includes('dsh-chrome-use')))
+    } finally {
+      await rm(world.root, { recursive: true, force: true })
+    }
+  })
+})
