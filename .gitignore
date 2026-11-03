@@ -1,0 +1,6 @@
+node_modules/
+*.log
+.DS_Store
+
+# Local sync state never belongs in the plugin's own repository.
+settings-sync/

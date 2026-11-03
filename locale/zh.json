@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "设置同步",
+    "description": "把 DeepSeek Harness 的全部设置——profile 配置、各插件设置、skills、已安装插件与 MCP 服务——备份到你自己的私有 Git 仓库。一台机器推送，另一台机器恢复；覆盖之前一定先留一个恢复点。"
+  }
+}

@@ -1,0 +1,28 @@
+# dsh-settings-sync — one Host row.
+#
+# Everything the browser half needs lives behind this row: the snapshot walker
+# (profile config, skills, per-plugin settings), the local bare-ish clone of the
+# private snapshot repository, git push/pull, and the `/settings-sync/*` HTTP
+# routes behind the connection trust fence.
+#
+# No credential is ever written into this file. Authentication for the remote is
+# whatever your ordinary `git` already uses (osxkeychain on macOS, an SSH agent,
+# or a credential helper), so a repository you can `git push` by hand is a
+# repository this plugin can push for you.
+- insert:
+    - id: settings-sync
+      name: 'dsh-settings-sync'
+      config:
+        # Where the sync bookkeeping lives: the local mirror clone, the config
+        # file, the restore backups, and the last-run state. Defaults to
+        # `$DSH_HOME/settings-sync`, i.e. `~/.dsh/settings-sync`.
+        stateDir: ''
+        # Git executable. Empty means "whatever `git` resolves to on PATH".
+        gitPath: ''
+        # Hard caps for one snapshot; a snapshot that exceeds them is refused
+        # with an error that names the offending root instead of silently
+        # uploading half a tree.
+        maxFiles: 4000
+        maxBytes: 33554432
+        # Skip files larger than this even when the total budget allows it.
+        maxFileBytes: 2097152

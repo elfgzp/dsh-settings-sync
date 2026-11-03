@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Settings Sync",
+    "description": "Back up and restore every DeepSeek Harness setting — profile config, per-plugin settings, skills, installed plugins, and MCP servers — through a private Git repository you own. Push from one machine, restore on another, with a restore point written before anything is overwritten."
+  }
+}
