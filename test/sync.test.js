@@ -22,7 +22,7 @@ import { promisify } from 'node:util'
 import { resolveConfig } from '../lib/config.js'
 import { SyncEngine } from '../lib/engine.js'
 import { Git, normalizeBranch, normalizeRemote, parsePorcelain } from '../lib/git.js'
-import { collectSnapshot, listRestorePoints, restoreSnapshot } from '../lib/snapshot.js'
+import { collectSnapshot, listRestorePoints, materialize, restoreSnapshot } from '../lib/snapshot.js'
 import { StateStore, normalizeUserConfig, promptPending } from '../lib/state.js'
 
 const run = promisify(execFile)
@@ -581,14 +581,152 @@ describe('cross-machine profile manifest merge', () => {
         dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', 'dsh-gongfeng-mr'] } },
       }, null, 2)}\n`)
 
-      const pulled = await engine.pull({ mode: 'overwrite' })
+      await engine.pull({ mode: 'overwrite' })
       const after = JSON.parse(await readFile(join(world.profileDir, 'package.json'), 'utf8'))
 
       assert.equal(after.name, 'dsh-profile-web')
       assert.equal(after.dependencies['dsh-gongfeng-mr'], 'link:/data/home/elfguan/Work/dsh-gongfeng-mr')
-      assert.ok(!after.dsh.profile.bundles.includes('dsh-chrome-use'), 'uninstalled bundle was skipped')
+      // A restore keeps a portable, declared bundle even before pnpm install
+      // runs — the caller installs it immediately after the merge.
+      assert.ok(after.dependencies['dsh-chrome-use'] === '0.4.1', 'portable dependency was merged')
+      assert.ok(after.dsh.profile.bundles.includes('dsh-chrome-use'), 'declared portable bundle was kept for install')
       assert.ok(after.dsh.profile.bundles.includes('dsh-gongfeng-mr'))
-      assert.ok(pulled.notes.some((note) => note.includes('dsh-chrome-use')))
+    } finally {
+      await rm(world.root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('portable plugin sources (the cross-machine root cause)', () => {
+  it('turns a link: git working tree into an installable spec', async () => {
+    const { resolveDependencySpec, portableSpecFromRemote, isPathSpec } = await import('../lib/plugins.js')
+    assert.equal(isPathSpec('link:/Users/gzp/Work/x'), true)
+    assert.equal(isPathSpec('github:elfgzp/x'), false)
+    assert.equal(portableSpecFromRemote('https://github.com/elfgzp/dsh-llm-minimax.git'), 'github:elfgzp/dsh-llm-minimax')
+    assert.equal(
+      portableSpecFromRemote('git@git.woa.com:elfguan/dsh-devops-pipeline.git'),
+      'git+ssh://git@git.woa.com/elfguan/dsh-devops-pipeline.git',
+    )
+    // A directory that is not a git repo stays local.
+    const local = await resolveDependencySpec('x', 'link:/nonexistent/path', '/tmp')
+    assert.equal(local.portable, false)
+    assert.equal(local.source, 'local-only')
+  })
+
+  it('materialize rewrites link: sources into git URLs in the snapshot', async () => {
+    const world = await buildWorld()
+    try {
+      // A fake "source repo" with an origin, linked from the profile.
+      const pluginDir = join(world.root, 'my-plugin')
+      await mkdir(pluginDir, { recursive: true })
+      await writeFile(join(pluginDir, 'package.json'), '{"name":"my-plugin","version":"1.0.0"}\n')
+      await git(pluginDir, 'init', '-q')
+      await git(pluginDir, 'remote', 'add', 'origin', 'https://github.com/elfgzp/my-plugin.git')
+
+      const manifest = JSON.parse(await readFile(join(world.profileDir, 'package.json'), 'utf8'))
+      manifest.dependencies['my-plugin'] = `link:${pluginDir}`
+      await writeFile(join(world.profileDir, 'package.json'), `${JSON.stringify(manifest, null, 2)}\n`)
+
+      const plan = await collectSnapshot(world.config)
+      const scratch = join(world.root, 'mirror')
+      const applied = await materialize(scratch, plan, { profileDir: world.profileDir })
+      assert.ok(applied.portable >= 1, 'at least one spec was made portable')
+
+      const snapshot = JSON.parse(await readFile(join(scratch, 'profile', 'package.json'), 'utf8'))
+      assert.ok(!String(snapshot.dependencies['my-plugin']).includes(world.root), 'no absolute source-machine path in the snapshot')
+      assert.equal(snapshot.dependencies['my-plugin'], 'github:elfgzp/my-plugin')
+      // The real profile file is untouched.
+      const real = JSON.parse(await readFile(join(world.profileDir, 'package.json'), 'utf8'))
+      assert.equal(real.dependencies['my-plugin'], `link:${pluginDir}`)
+    } finally {
+      await rm(world.root, { recursive: true, force: true })
+    }
+  })
+
+  it('the merged manifest keeps portable plugins and filters only the truly local', async () => {
+    const { mergeManifest } = await import('../lib/manifest.js')
+    const incoming = {
+      name: 'dsh-profile-desktop',
+      dependencies: {
+        'dsh-llm-minimax': 'github:elfgzp/dsh-llm-minimax',
+        'dsh-devops-pipeline': 'git+ssh://git@git.woa.com/elfguan/dsh-devops-pipeline.git',
+        '@local/dsh-mcp-intranet': 'link:/Users/gzp/.local/share/dsh-bundles/mcp-intranet',
+      },
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', 'dsh-llm-minimax', 'dsh-devops-pipeline'] } },
+    }
+    const local = {
+      name: 'dsh-profile-web',
+      dependencies: { 'dsh-gongfeng-mr': 'link:/data/home/elfguan/Work/dsh-gongfeng-mr' },
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', 'dsh-gongfeng-mr'] } },
+    }
+    // The target machine has just installed the portable deps.
+    const merged = mergeManifest({
+      incoming, local,
+      installed: ['dsh-llm-minimax', 'dsh-devops-pipeline', 'dsh-gongfeng-mr'],
+    })
+    assert.equal(merged.manifest.dependencies['dsh-llm-minimax'], 'github:elfgzp/dsh-llm-minimax')
+    assert.equal(merged.manifest.dependencies['dsh-gongfeng-mr'], 'link:/data/home/elfguan/Work/dsh-gongfeng-mr')
+    // The no-git local bundle is not expected to resolve here.
+    assert.equal(merged.manifest.dependencies['@local/dsh-mcp-intranet'], undefined)
+    assert.ok(merged.manifest.dsh.profile.bundles.includes('dsh-llm-minimax'))
+    assert.ok(merged.manifest.dsh.profile.bundles.includes('dsh-devops-pipeline'))
+    assert.ok(merged.manifest.dsh.profile.bundles.includes('dsh-gongfeng-mr'))
+  })
+})
+
+describe('automatic plugin install', () => {
+  it('finds pnpm next to the running node', async () => {
+    const { resolvePnpm } = await import('../lib/install.js')
+    const pnpm = resolvePnpm(undefined)
+    assert.ok(pnpm !== null, 'a pnpm invocation was found on this machine')
+    assert.equal(typeof pnpm.command, 'string')
+    // Prefer an absolute path over a bare PATH lookup when possible.
+    assert.ok(pnpm.command.length > 0)
+  })
+
+  it('honours a DSH-provided packageManager invocation', async () => {
+    const { resolvePnpm } = await import('../lib/install.js')
+    const pnpm = resolvePnpm({
+      packageManager: { command: '/custom/pnpm.mjs', args: ['--config.foo=1'], env: { FOO: 'bar' } },
+    })
+    assert.equal(pnpm.command, '/custom/pnpm.mjs')
+    assert.deepEqual(pnpm.prefixArgs, ['--config.foo=1'])
+    assert.equal(pnpm.env.FOO, 'bar')
+  })
+
+  it('pull attempts to install declared plugins when autoInstall is on', async () => {
+    const world = await buildWorld()
+    try {
+      // A tiny installable package with no build script, served from a local
+      // directory so the test never touches the network. `file:` is a local
+      // spec by design (it names a path on one machine), so it is kept in the
+      // merged dependencies but not enabled as a bundle — what this test checks
+      // is that the install step actually runs and is reported.
+      const pluginDir = join(world.root, 'tiny-plugin')
+      await mkdir(pluginDir, { recursive: true })
+      await writeFile(join(pluginDir, 'package.json'), `${JSON.stringify({
+        name: 'tiny-plugin', version: '1.0.0', private: true,
+      }, null, 2)}\n`)
+      await writeFile(join(world.profileDir, 'package.json'), `${JSON.stringify({
+        name: 'dsh-profile-test',
+        dependencies: { 'tiny-plugin': `file:${pluginDir}` },
+        dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', 'tiny-plugin'] } },
+      }, null, 2)}\n`)
+      await writeFile(join(world.profileDir, 'pnpm-workspace.yaml'), 'packages:\n  - .\n')
+
+      const state = new StateStore(world.config.stateDir)
+      await state.writeUserConfig({ repoUrl: world.remoteDir, gitName: 'T', gitEmail: 't@e.com' })
+      const engine = new SyncEngine({ config: world.config, state })
+      await engine.push({})
+
+      const pulled = await engine.pull({ mode: 'overwrite' })
+      assert.ok(pulled.install !== null, 'the pull reports an install attempt')
+      assert.equal(typeof pulled.install.ok, 'boolean')
+      // A restore point and the merged dependency survive regardless of whether
+      // pnpm happens to be available in this sandbox.
+      assert.ok(pulled.backedUpTo !== null)
+      const after = JSON.parse(await readFile(join(world.profileDir, 'package.json'), 'utf8'))
+      assert.equal(after.dependencies['tiny-plugin'], `file:${pluginDir}`)
     } finally {
       await rm(world.root, { recursive: true, force: true })
     }

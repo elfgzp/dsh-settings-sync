@@ -188,6 +188,7 @@ export function apply(ctx, rawConfig) {
   const engine = new SyncEngine({
     config: deployment,
     state,
+    profileContext: safeGet(ctx, 'profileContext'),
     log: (message, error) => ctx.logger?.warn?.(`settings-sync: ${message}`, error),
   })
 
@@ -263,6 +264,7 @@ export function apply(ctx, rawConfig) {
         gitName: user.gitName,
         gitEmail: user.gitEmail,
         redactSecrets: user.redactSecrets,
+        autoInstall: user.autoInstall,
       },
       paths: {
         stateDir: deployment.stateDir,
@@ -308,6 +310,7 @@ export function apply(ctx, rawConfig) {
       gitName: typeof body.gitName === 'string' ? body.gitName : undefined,
       gitEmail: typeof body.gitEmail === 'string' ? body.gitEmail : undefined,
       redactSecrets: typeof body.redactSecrets === 'boolean' ? body.redactSecrets : undefined,
+      autoInstall: typeof body.autoInstall === 'boolean' ? body.autoInstall : undefined,
     })
     return {
       config: {
@@ -319,6 +322,7 @@ export function apply(ctx, rawConfig) {
         gitName: config.gitName,
         gitEmail: config.gitEmail,
         redactSecrets: config.redactSecrets,
+        autoInstall: config.autoInstall,
       },
     }
   })
