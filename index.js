@@ -44,7 +44,20 @@ import { resolveConfig } from './lib/config.js'
 import { Config } from './lib/schema.js'
 import { StateStore, promptPending } from './lib/state.js'
 
-/** This plugin's route prefix. */
+/**
+ * Cordis 的硬依赖声明。
+ *
+ * 这一行不是可选的装饰：没有它，Cordis 会在依赖就绪之前就调用 `apply`，于是在
+ * 全新启动时 `ctx.get('webServer')` 还是 undefined，插件直接抛错、整条 row 进入
+ * failed 状态（重启后的日志里就是「1 entry did not activate」）。声明之后框架会
+ * 等到这两个服务发布再激活本插件。
+ *
+ * 之前这个问题没暴露，是因为开发机上的 DSH 已经运行很久、服务早已就绪，只有
+ * 「冷启动」才会命中——换一台干净的机器安装就立刻复现。
+ */
+export const inject = ['webServer', 'connection']
+
+/** 本插件独占的路由前缀。 */
 const PREFIX = '/settings-sync'
 
 /**
