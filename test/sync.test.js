@@ -732,3 +732,41 @@ describe('automatic plugin install', () => {
     }
   })
 })
+
+describe('local installs are never replaced by remote URLs', () => {
+  it('a local file: spec wins over the remote git URL for the same package', async () => {
+    const { mergeManifest } = await import('../lib/manifest.js')
+    const merged = mergeManifest({
+      incoming: {
+        name: 'dsh-profile-desktop',
+        dependencies: { 'dsh-llm-tencent-intranet': 'https://cnb.woa.com/fishen/dsh-llm-tencent-intranet' },
+        dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', 'dsh-llm-tencent-intranet'] } },
+      },
+      local: {
+        name: 'dsh-profile-web',
+        dependencies: { 'dsh-llm-tencent-intranet': 'file:/data/home/elfguan/.dsh-plugin-pkgs/x.tgz' },
+        dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', 'dsh-llm-tencent-intranet'] } },
+      },
+      installed: ['dsh-llm-tencent-intranet'],
+    })
+    assert.equal(
+      merged.manifest.dependencies['dsh-llm-tencent-intranet'],
+      'file:/data/home/elfguan/.dsh-plugin-pkgs/x.tgz',
+      'the working local tgz is kept, not the auth-requiring remote URL',
+    )
+  })
+
+  it('remote portable plugins still fill gaps this machine does not have', async () => {
+    const { mergeManifest } = await import('../lib/manifest.js')
+    const merged = mergeManifest({
+      incoming: {
+        dependencies: { 'dsh-llm-minimax': 'github:elfgzp/dsh-llm-minimax' },
+        dsh: { profile: { bundles: ['dsh-llm-minimax'] } },
+      },
+      local: { dependencies: {}, dsh: { profile: { bundles: [] } } },
+      installed: [],
+    })
+    assert.equal(merged.manifest.dependencies['dsh-llm-minimax'], 'github:elfgzp/dsh-llm-minimax')
+    assert.ok(merged.manifest.dsh.profile.bundles.includes('dsh-llm-minimax'))
+  })
+})
