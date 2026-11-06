@@ -888,9 +888,70 @@ describe('portable plugin sources (the cross-machine root cause)', () => {
     assert.ok(merged.manifest.dsh.profile.bundles.includes('dsh-devops-pipeline'))
     assert.ok(merged.manifest.dsh.profile.bundles.includes('dsh-gongfeng-mr'))
   })
+
+  it('keeps bundles the Host ships itself even when the profile installs nothing', async () => {
+    const { mergeManifest } = await import('../lib/manifest.js')
+    const merged = mergeManifest({
+      incoming: {
+        dependencies: { 'dsh-llm-minimax': 'github:elfgzp/dsh-llm-minimax' },
+        dsh: {
+          profile: {
+            bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-experimental-forge-bundle', 'dsh-llm-minimax'],
+          },
+        },
+      },
+      local: { dependencies: {}, dsh: { profile: { bundles: [] } } },
+      installed: [],
+      // What `hostProvidedBundles` finds inside the desktop app's archive: a
+      // package that is loadable but never appears in the profile's node_modules.
+      hostResolvable: ['@deepseek-ai/dsh-experimental-forge-bundle'],
+    })
+    assert.ok(
+      merged.manifest.dsh.profile.bundles.includes('@deepseek-ai/dsh-experimental-forge-bundle'),
+      'a bundle the Host provides is not silently dropped',
+    )
+    assert.ok(merged.manifest.dsh.profile.bundles.includes('dsh-llm-minimax'))
+    assert.deepEqual(merged.droppedBundles, [])
+  })
 })
 
 describe('automatic plugin install', () => {
+  it('resolves before installing so a fetch failure cannot empty the profile', async () => {
+    const { installDeclaredPlugins } = await import('../lib/install.js')
+    const calls = []
+    const result = await installDeclaredPlugins({
+      profileDir: '/tmp/profile',
+      profileContext: { packageManager: { command: 'pnpm', args: [] } },
+      runPnpm: async (args) => {
+        calls.push(args)
+        return { ok: false, message: '[ERR_PNPM_FETCH_401] GET https://cnb.woa.com/x: Unauthorized - 401' }
+      },
+    })
+    assert.equal(result.ok, false)
+    assert.equal(result.phase, 'resolve')
+    assert.equal(calls.length, 1, 'the real install never started')
+    assert.ok(calls[0].includes('--lockfile-only'))
+    assert.match(result.message, /401/)
+  })
+
+  it('installs only after the resolution preflight succeeds', async () => {
+    const { installDeclaredPlugins } = await import('../lib/install.js')
+    const calls = []
+    const result = await installDeclaredPlugins({
+      profileDir: '/tmp/profile',
+      profileContext: { packageManager: { command: 'pnpm', args: [] } },
+      runPnpm: async (args) => {
+        calls.push(args)
+        return { ok: true, message: 'Done' }
+      },
+    })
+    assert.equal(result.ok, true)
+    assert.equal(result.phase, 'install')
+    assert.equal(calls.length, 2)
+    assert.ok(calls[0].includes('--lockfile-only'))
+    assert.deepEqual(calls[1], ['install'])
+  })
+
   it('finds pnpm next to the running node', async () => {
     const { resolvePnpm } = await import('../lib/install.js')
     const pnpm = resolvePnpm(undefined)
