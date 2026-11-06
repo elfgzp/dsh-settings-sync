@@ -1,6 +1,6 @@
 {
   "name": "dsh-settings-sync",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Sync every DeepSeek Harness setting — profile config, skills, installed plugins, MCP servers and per-plugin settings — to a private Git repository, with one-click backup and restore.",
   "type": "module",
   "license": "MIT",
