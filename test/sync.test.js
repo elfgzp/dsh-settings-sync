@@ -23,7 +23,7 @@ import { resolveConfig } from '../lib/config.js'
 import { SyncEngine } from '../lib/engine.js'
 import { Git, normalizeBranch, normalizeRemote, parsePorcelain } from '../lib/git.js'
 import { activeBundles, mergeManifest, missingBundles } from '../lib/manifest.js'
-import { collectSnapshot, listRestorePoints, materialize, restoreSnapshot } from '../lib/snapshot.js'
+import { collectSnapshot, hostProvidedBundles, listRestorePoints, materialize, restoreSnapshot } from '../lib/snapshot.js'
 import { StateStore, normalizeUserConfig, promptPending } from '../lib/state.js'
 
 const run = promisify(execFile)
@@ -915,6 +915,51 @@ describe('portable plugin sources (the cross-machine root cause)', () => {
   })
 })
 
+describe('host-provided bundle probing', () => {
+  it('returns nothing for an empty candidate list without touching the filesystem', async () => {
+    assert.deepEqual(await hostProvidedBundles([]), [])
+  })
+
+  it('never claims a name the Host cannot resolve', async () => {
+    // A name no installation carries. The point of this assertion is the failure
+    // mode that caused the devcloud false alarm: an empty answer is benign, a
+    // *wrong* answer is not, so an unresolvable name must stay out of the list.
+    const resolved = await hostProvidedBundles([
+      'dsh-definitely-not-a-real-package-xyzzy',
+      '@deepseek-ai/also-not-real-xyzzy',
+    ])
+    assert.deepEqual(resolved, [])
+  })
+
+  it('probes the CLI runtime layout through DSH_RUNTIME_DIR', async () => {
+    // Reproduce a CLI host in a scratch directory: `<root>/node_modules/<pkg>`
+    // is exactly the layout `~/.dsh-runtime` uses, and Node resolves it the same
+    // way. This is the anchor that was missing and produced 22 false positives
+    // on a fresh devcloud profile (the desktop app.asar anchor returned []).
+    const root = await mkdtemp(join(tmpdir(), 'dsh-runtime-'))
+    const previous = process.env.DSH_RUNTIME_DIR
+    try {
+      const pkgDir = join(root, 'node_modules', 'host-shipped-bundle')
+      await mkdir(pkgDir, { recursive: true })
+      await writeFile(join(pkgDir, 'package.json'), `${JSON.stringify({
+        name: 'host-shipped-bundle',
+        version: '1.0.0',
+        main: 'index.js',
+      }, null, 2)}\n`)
+      await writeFile(join(pkgDir, 'index.js'), 'export const name = "host-shipped-bundle"\n')
+
+      process.env.DSH_RUNTIME_DIR = root
+      const resolved = await hostProvidedBundles(['host-shipped-bundle', 'profile-only-bundle'])
+      assert.deepEqual(resolved, ['host-shipped-bundle'],
+        'a package in the Host runtime is provided; one only the profile could install is not')
+    } finally {
+      if (previous === undefined) delete process.env.DSH_RUNTIME_DIR
+      else process.env.DSH_RUNTIME_DIR = previous
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+})
+
 describe('automatic plugin install', () => {
   it('resolves before installing so a fetch failure cannot empty the profile', async () => {
     const { installDeclaredPlugins } = await import('../lib/install.js')
@@ -1117,6 +1162,55 @@ describe('uninstalled bundles after a pull', () => {
     // Degenerate inputs.
     assert.deepEqual(missingBundles(undefined, []), [])
     assert.deepEqual(missingBundles({ dsh: { profile: { bundles: [] } } }, []), [])
+  })
+
+  it('missingBundles excludes packages the Host itself resolves', () => {
+    // The exact shape a clean-machine restore produced: the *far* machine's
+    // package.json lists a Host-shipped bundle as a dependency, so it passes the
+    // "is a dependency" guard while being absent from node_modules. Restarting
+    // would have worked fine; reporting it told the user 21 plugins were broken.
+    const freshMachine = {
+      dependencies: {
+        '@deepseek-ai/dsh-experimental-agent-team-profile': '0.2.2-rc.1',
+        'dsh-agent-team-playbook': '^1.2.0',
+      },
+      dsh: { profile: { bundles: [
+        '@deepseek-ai/dsh-base',
+        '@deepseek-ai/dsh-experimental-agent-team-profile',
+        'dsh-agent-team-playbook',
+      ] } },
+    }
+    // Without the Host's answer both look missing...
+    assert.deepEqual(
+      missingBundles(freshMachine, []),
+      ['@deepseek-ai/dsh-experimental-agent-team-profile', 'dsh-agent-team-playbook'],
+    )
+    // ...with it, only the genuinely uninstallable one remains.
+    assert.deepEqual(
+      missingBundles(freshMachine, [], ['@deepseek-ai/dsh-experimental-agent-team-profile']),
+      ['dsh-agent-team-playbook'],
+    )
+    // Installed wins over everything, and the Host list cannot resurrect a name
+    // the profile does not declare at all.
+    assert.deepEqual(missingBundles(freshMachine, ['dsh-agent-team-playbook'], []), [
+      '@deepseek-ai/dsh-experimental-agent-team-profile',
+    ])
+    assert.deepEqual(missingBundles(freshMachine, [], ['something-else']), [
+      '@deepseek-ai/dsh-experimental-agent-team-profile',
+      'dsh-agent-team-playbook',
+    ])
+  })
+
+  it('missingBundles keeps working with the old two-argument call', () => {
+    // Backward compatibility: `hostResolvable` is optional and defaults to empty,
+    // so callers written before it existed behave exactly as they did.
+    const manifest = {
+      dependencies: { 'dsh-alpha': '^1.0.0' },
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', 'dsh-alpha'] } },
+    }
+    assert.deepEqual(missingBundles(manifest, []), ['dsh-alpha'])
+    assert.deepEqual(missingBundles(manifest, []), missingBundles(manifest, [], []))
+    assert.deepEqual(missingBundles(manifest, [], ['dsh-alpha']), [])
   })
 })
 
