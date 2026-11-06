@@ -813,6 +813,94 @@ describe('cross-machine profile manifest merge', () => {
   })
 })
 
+describe('portable manifest result shape', () => {
+  /**
+   * Every `makePortableManifest` return value must carry the same diagnostics.
+   *
+   * The shape is a contract: `materialize` reads `.resolved` and spreads
+   * `.collisions` without checking. An early return that omitted `collisions`
+   * turned a legal `package.json` (one with no `dependencies` key) into
+   * `TypeError: undefined is not iterable`, which took down the whole push.
+   *
+   * @param {object} result - A `makePortableManifest` result.
+   */
+  function assertCompleteShape(result) {
+    assert.ok(Array.isArray(result.localOnly), 'localOnly is always an array')
+    assert.ok(Array.isArray(result.collisions), 'collisions is always an array')
+    assert.ok(result.resolved !== null && typeof result.resolved === 'object', 'resolved is always an object')
+    assert.ok(!Array.isArray(result.resolved), 'resolved is a record, not a list')
+    assert.ok(result.manifest !== null && typeof result.manifest === 'object', 'manifest is always an object')
+    // The exact failure that was reported: spreading undefined.
+    assert.doesNotThrow(() => { const sink = []; sink.push(...result.collisions) },
+      'collisions is spreadable')
+  }
+
+  it('returns a complete shape for a manifest with no dependencies key', async () => {
+    const { makePortableManifest } = await import('../lib/plugins.js')
+    const result = await makePortableManifest({
+      // A fresh or hand-edited profile legitimately has no `dependencies`.
+      manifest: { name: 'edgecase-profile', dsh: { profile: { bundles: [] } } },
+      profileDir: '/tmp/does-not-need-to-exist',
+    })
+    assertCompleteShape(result)
+    assert.deepEqual(Object.keys(result).sort(), ['collisions', 'localOnly', 'manifest', 'resolved'])
+  })
+
+  it('returns a complete shape for null and array dependencies', async () => {
+    const { makePortableManifest } = await import('../lib/plugins.js')
+    for (const dependencies of [null, [], ['not-an-object'], 'a string', 42]) {
+      const result = await makePortableManifest({
+        manifest: { name: 'p', dependencies },
+        profileDir: '/tmp/x',
+      })
+      assertCompleteShape(result, JSON.stringify(dependencies))
+      assert.deepEqual(result.localOnly, [])
+      assert.deepEqual(result.collisions, [])
+    }
+  })
+
+  it('returns a complete shape on the normal path too', async () => {
+    const { makePortableManifest } = await import('../lib/plugins.js')
+    const result = await makePortableManifest({
+      manifest: { name: 'p', dependencies: { 'dsh-x': 'github:elfgzp/dsh-x' } },
+      profileDir: '/tmp/x',
+    })
+    assertCompleteShape(result)
+  })
+
+  it('materialize survives a profile package.json without dependencies', async () => {
+    // End-to-end for the reported crash: this used to throw inside `materialize`
+    // while writing the snapshot, so a push never completed.
+    const root = await mkdtemp(join(tmpdir(), 'nodeps-'))
+    try {
+      const profileDir = join(root, 'profile')
+      await mkdir(profileDir, { recursive: true })
+      await writeFile(join(profileDir, 'package.json'), `${JSON.stringify({
+        name: 'edgecase-profile',
+        dsh: { profile: { bundles: [] } },
+      }, null, 2)}\n`)
+
+      const plan = {
+        files: [{ source: join(profileDir, 'package.json'), target: 'profile/package.json' }],
+        skills: [],
+        plugins: [],
+        bytes: 0,
+        skipped: [],
+        dshHomeEntries: [],
+      }
+      const applied = await materialize(join(root, 'mirror'), plan, { profileDir })
+      assert.equal(applied.written, 1)
+      assert.ok(Array.isArray(applied.collisions), 'materialize always reports a collisions array')
+      assert.deepEqual(applied.collisions, [])
+      // The mirror copy exists and is still valid JSON.
+      const written = JSON.parse(await readFile(join(root, 'mirror', 'profile', 'package.json'), 'utf8'))
+      assert.equal(written.name, 'edgecase-profile')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+})
+
 describe('portable plugin sources (the cross-machine root cause)', () => {
   it('turns a link: git working tree into an installable spec', async () => {
     const { resolveDependencySpec, portableSpecFromRemote, isPathSpec } = await import('../lib/plugins.js')
@@ -827,6 +915,115 @@ describe('portable plugin sources (the cross-machine root cause)', () => {
     const local = await resolveDependencySpec('x', 'link:/nonexistent/path', '/tmp')
     assert.equal(local.portable, false)
     assert.equal(local.source, 'local-only')
+  })
+
+  it('refuses to turn monorepo subpackages into one shared git URL', async () => {
+    // The devcloud startup failure, reproduced: a repo whose root is a private
+    // monorepo and whose `packages/*` are the real plugin bundles. Every one of
+    // them reports the *same* `git remote get-url origin`, so emitting that URL
+    // per package installs the repo root twice — a manifest with no `dsh.bundle`
+    // and none of the subpackage files.
+    const root = await mkdtemp(join(tmpdir(), 'mono-'))
+    try {
+      const repoDir = join(root, 'mono-repo')
+      for (const name of ['pkg-a', 'pkg-b']) {
+        await mkdir(join(repoDir, 'packages', name), { recursive: true })
+        await writeFile(join(repoDir, 'packages', name, 'package.json'), `${JSON.stringify({
+          name,
+          version: '1.0.0',
+          dsh: { bundle: { patch: './cordis.patch.yml' } },
+        }, null, 2)}\n`)
+      }
+      await writeFile(join(repoDir, 'package.json'), `${JSON.stringify({
+        name: 'my-monorepo', version: '1.0.0', private: true,
+      }, null, 2)}\n`)
+      await git(repoDir, 'init', '-q')
+      await git(repoDir, 'remote', 'add', 'origin', 'https://github.com/elfgzp/dsh-itfs-workbench.git')
+
+      // A normal standalone repo package: this one MUST still become portable.
+      const standalone = join(root, 'standalone')
+      await mkdir(standalone, { recursive: true })
+      await writeFile(join(standalone, 'package.json'), `${JSON.stringify({
+        name: 'standalone-plugin', version: '1.0.0',
+        dsh: { bundle: { patch: './cordis.patch.yml' } },
+      }, null, 2)}\n`)
+      await git(standalone, 'init', '-q')
+      await git(standalone, 'remote', 'add', 'origin', 'https://github.com/elfgzp/standalone.git')
+
+      const { makePortableManifest } = await import('../lib/plugins.js')
+      const outcome = await makePortableManifest({
+        profileDir: root,
+        manifest: {
+          name: 'dsh-profile-test',
+          dependencies: {
+            'pkg-a': `link:${join(repoDir, 'packages', 'pkg-a')}`,
+            'pkg-b': `link:${join(repoDir, 'packages', 'pkg-b')}`,
+            'standalone-plugin': `link:${standalone}`,
+          },
+        },
+      })
+
+      // The invariant this whole fix exists for: no two package names may end up
+      // pointing at the same install spec.
+      const specs = Object.values(outcome.manifest.dependencies)
+      const portableSpecs = specs.filter((spec) => !String(spec).startsWith('link:'))
+      assert.equal(
+        new Set(portableSpecs).size,
+        portableSpecs.length,
+        `two packages share one spec: ${JSON.stringify(portableSpecs)}`,
+      )
+
+      // The subpackages keep their local link (installable only where they live).
+      assert.ok(String(outcome.manifest.dependencies['pkg-a']).startsWith('link:'))
+      assert.ok(String(outcome.manifest.dependencies['pkg-b']).startsWith('link:'))
+      assert.deepEqual(outcome.localOnly.sort(), ['pkg-a', 'pkg-b'])
+
+      // The standalone package is still made portable — the fix must not disable
+      // the feature it is repairing.
+      assert.equal(outcome.manifest.dependencies['standalone-plugin'], 'github:elfgzp/standalone')
+      assert.deepEqual(outcome.resolved, { 'standalone-plugin': 'github:elfgzp/standalone' })
+      // Two subpackages of one repo never reach the collision stage, because the
+      // subdirectory check already demoted them.
+      assert.deepEqual(outcome.collisions, [])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('demotes every loser when two distinct packages really do share one URL', async () => {
+    // Belt and braces: if two *separate* repos resolve to the same spec (a
+    // rewritten remote, a fork, a rewrite rule), shipping that spec twice is
+    // still an uninstallable snapshot, so both are demoted and reported.
+    const root = await mkdtemp(join(tmpdir(), 'shared-'))
+    try {
+      const dirs = []
+      for (const name of ['alpha', 'beta']) {
+        const dir = join(root, name)
+        await mkdir(dir, { recursive: true })
+        await writeFile(join(dir, 'package.json'), `${JSON.stringify({ name, version: '1.0.0' })}\n`)
+        await git(dir, 'init', '-q')
+        await git(dir, 'remote', 'add', 'origin', 'https://github.com/elfgzp/one-repo.git')
+        dirs.push(dir)
+      }
+
+      const { makePortableManifest } = await import('../lib/plugins.js')
+      const outcome = await makePortableManifest({
+        profileDir: root,
+        manifest: {
+          name: 'p',
+          dependencies: { alpha: `link:${dirs[0]}`, beta: `link:${dirs[1]}` },
+        },
+      })
+
+      assert.deepEqual(outcome.collisions, ['github:elfgzp/one-repo'])
+      assert.deepEqual(outcome.resolved, {}, 'neither loser is reported as resolved')
+      assert.deepEqual(outcome.localOnly.sort(), ['alpha', 'beta'])
+      // The original link specs are restored, not left as the shared URL.
+      assert.equal(outcome.manifest.dependencies.alpha, `link:${dirs[0]}`)
+      assert.equal(outcome.manifest.dependencies.beta, `link:${dirs[1]}`)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
   })
 
   it('materialize rewrites link: sources into git URLs in the snapshot', async () => {
