@@ -22,6 +22,7 @@ import { promisify } from 'node:util'
 import { resolveConfig } from '../lib/config.js'
 import { SyncEngine } from '../lib/engine.js'
 import { Git, normalizeBranch, normalizeRemote, parsePorcelain } from '../lib/git.js'
+import { activeBundles, mergeManifest, missingBundles } from '../lib/manifest.js'
 import { collectSnapshot, listRestorePoints, materialize, restoreSnapshot } from '../lib/snapshot.js'
 import { StateStore, normalizeUserConfig, promptPending } from '../lib/state.js'
 
@@ -334,6 +335,221 @@ describe('destructive push guard', () => {
       // The remote is untouched.
       const listing = await git(world.remoteDir, 'ls-tree', '-r', '--name-only', 'main')
       assert.match(listing, /profile\/package\.json/)
+    } finally {
+      await rm(world.root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('destructive pull guard', () => {
+  /**
+   * Build a world where the remote holds a *small* snapshot and this machine has
+   * a *large* one — the exact shape that used to silently wipe a main machine
+   * after a push from a fresh laptop.
+   *
+   * The far side is produced by a second, deliberately sparse profile: it pushes
+   * first, so the remote really is "the other machine's settings" rather than a
+   * hand-made tree, and the guard is exercised against a genuine remote branch.
+   *
+   * @returns {Promise<{world: object, engine: any, sparseFiles: string[], fullFiles: string[], remoteTree: string}>} Fixture.
+   */
+  async function buildLopsidedWorld() {
+    const world = await buildWorld()
+    const state = new StateStore(world.config.stateDir)
+    await state.writeUserConfig({ repoUrl: world.remoteDir, gitName: 'T', gitEmail: 't@e.com' })
+
+    // --- the sparse machine pushes first ---
+    const sparseRoot = await mkdtemp(join(tmpdir(), 'settings-sync-sparse-'))
+    const sparseDshHome = join(sparseRoot, '.dsh')
+    const sparseAgents = join(sparseRoot, '.agents')
+    const sparseProfile = join(sparseDshHome, 'profiles', 'desktop')
+    await mkdir(sparseProfile, { recursive: true })
+    await mkdir(join(sparseAgents, 'skills'), { recursive: true })
+    await writeFile(join(sparseProfile, 'cordis.yml'), '[]\n')
+    const sparseConfig = resolveConfig({ stateDir: world.config.stateDir }, {
+      HOME: sparseRoot,
+      DSH_HOME: sparseDshHome,
+      DSH_AGENTS_HOME: sparseAgents,
+      DSH_PROFILE_DIR: sparseProfile,
+    })
+
+    // --- this machine: many extra settings the other machine does not have ---
+    // The guard's floor is max(8, 50%), so a fixture with a handful of files could
+    // never trip it. These are ordinary managed files: per-plugin state under
+    // `~/.dsh/gongfeng-mr/` and extra skills under the shared agents root.
+    const extras = []
+    for (let index = 0; index < 14; index += 1) {
+      const name = `extra-${String(index).padStart(2, '0')}.json`
+      await writeFile(join(world.dshHome, 'gongfeng-mr', name), `${JSON.stringify({ index })}\n`)
+      extras.push(`homes/dsh/gongfeng-mr/${name}`)
+    }
+    for (let index = 0; index < 6; index += 1) {
+      const name = `local-skill-${String(index).padStart(2, '0')}`
+      await mkdir(join(world.agentsHome, 'skills', name), { recursive: true })
+      await writeFile(
+        join(world.agentsHome, 'skills', name, 'SKILL.md'),
+        `---\nname: ${name}\ndescription: Local only.\n---\n`,
+      )
+      extras.push(`homes/agents/skills/${name}/SKILL.md`)
+    }
+
+    try {
+      const sparseEngine = new SyncEngine({ config: sparseConfig, state })
+      const pushed = await sparseEngine.push({})
+      assert.equal(pushed.pushed, true)
+
+      // Snapshot paths the remote carries. `manifest.json` lives at the tree root
+      // and is not a managed path (it has no prefix), so `listSnapshotFiles` —
+      // and therefore the guard — never sees it. Filter the same way here.
+      const remoteTree = await git(world.remoteDir, 'ls-tree', '-r', '--name-only', 'main')
+      const sparseFiles = remoteTree
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line !== '' && line !== 'manifest.json')
+
+      // --- this machine has everything from buildWorld() plus the extras ---
+      const engine = new SyncEngine({ config: world.config, state })
+      const plan = await engine.lastPlan()
+      const fullFiles = plan.files.map((file) => file.target)
+
+      return { world, engine, sparseFiles, fullFiles, remoteTree, extras, sparseRoot }
+    } catch (error) {
+      await rm(sparseRoot, { recursive: true, force: true })
+      await rm(world.root, { recursive: true, force: true })
+      throw error
+    }
+  }
+
+  it('refuses an overwrite pull that would delete most local files, and deletes nothing', async () => {
+    const fixture = await buildLopsidedWorld()
+    const { world, engine, sparseFiles, fullFiles } = fixture
+    try {
+      assert.ok(sparseFiles.length > 0, 'the sparse machine really pushed something')
+      assert.ok(
+        fullFiles.length > sparseFiles.length,
+        `fixture must be lopsided (local ${fullFiles.length} vs remote ${sparseFiles.length})`,
+      )
+
+      // Prediction: every local target the remote does not carry would be deleted.
+      const incoming = new Set(sparseFiles)
+      const wouldDelete = fullFiles.filter((target) => !incoming.has(target))
+      assert.ok(
+        wouldDelete.length > Math.max(8, fullFiles.length * 0.5),
+        `fixture must trip the threshold (${wouldDelete.length} of ${fullFiles.length})`,
+      )
+
+      // Capture every local file's bytes BEFORE the refused pull: `source` is the
+      // absolute path on this machine, `target` is the snapshot-relative one.
+      const localBefore = new Map()
+      for (const file of (await engine.lastPlan()).files) {
+        localBefore.set(file.target, { source: file.source, bytes: await readFile(file.source) })
+      }
+      assert.ok(localBefore.size > 0, 'captured local file contents')
+
+      await assert.rejects(
+        () => engine.pull({ mode: 'overwrite' }),
+        (error) => {
+          assert.equal(error.code, 'mass-deletion-on-pull')
+          assert.equal(error.name, 'SyncError')
+          // The message must quantify the damage and name the escape hatch.
+          assert.match(error.message, /删除本机 \d+ 个设置文件/)
+          assert.match(error.message, /强制恢复/)
+          return true
+        },
+      )
+
+      // KEY ASSERTION: a refused pull deletes nothing and rewrites nothing.
+      for (const [target, { source, bytes }] of localBefore) {
+        await assert.doesNotReject(
+          () => stat(source),
+          `local file was deleted by a refused pull: ${target}`,
+        )
+        const after = await readFile(source)
+        assert.deepEqual(after, bytes, `local file changed by a refused pull: ${target}`)
+      }
+
+      // The remote is untouched too: a refused pull never pushes.
+      const remoteAfter = await git(world.remoteDir, 'ls-tree', '-r', '--name-only', 'main')
+      assert.equal(remoteAfter, fixture.remoteTree)
+    } finally {
+      await rm(world.root, { recursive: true, force: true })
+      await rm(fixture.sparseRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('applies the same overwrite pull when force is set, deleting the extra files', async () => {
+    const fixture = await buildLopsidedWorld()
+    const { world, engine, sparseFiles, fullFiles } = fixture
+    try {
+      const incoming = new Set(sparseFiles)
+      const expectedDeletions = fullFiles.filter((target) => !incoming.has(target))
+      assert.ok(expectedDeletions.length > 0)
+
+      const result = await engine.pull({ mode: 'overwrite', force: true })
+      assert.ok(result.files > 0, 'the remote files were written')
+      assert.equal(
+        result.removed,
+        expectedDeletions.length,
+        'force mode deleted exactly the files the guard predicted',
+      )
+      assert.ok(result.backedUpTo !== null, 'a restore point was still written before overwriting')
+
+      // The files the remote carried are the ones that survived.
+      const remaining = (await engine.lastPlan()).files.map((file) => file.target)
+      for (const path of sparseFiles) {
+        assert.ok(remaining.includes(path), `remote file was not restored: ${path}`)
+      }
+      assert.ok(
+        remaining.length < fullFiles.length,
+        'force mode really shrank the local tree',
+      )
+    } finally {
+      await rm(world.root, { recursive: true, force: true })
+      await rm(fixture.sparseRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('never deletes in merge-skills mode, so the guard does not apply', async () => {
+    const fixture = await buildLopsidedWorld()
+    const { world, engine, sparseFiles, fullFiles } = fixture
+    try {
+      const incoming = new Set(sparseFiles)
+      const localOnly = fullFiles.filter((target) => !incoming.has(target))
+      assert.ok(localOnly.length > 0, 'the fixture has local-only files')
+
+      // No force, and the same lopsided shape the overwrite guard rejects.
+      const result = await engine.pull({ mode: 'merge-skills' })
+      assert.equal(result.removed, 0, 'merge-skills must never delete')
+
+      const remaining = (await engine.lastPlan()).files.map((file) => file.target)
+      for (const path of localOnly) {
+        assert.ok(remaining.includes(path), `merge-skills deleted a local-only file: ${path}`)
+      }
+      // And the remote's files landed too: it is a union, not a no-op.
+      for (const path of sparseFiles) {
+        assert.ok(remaining.includes(path), `merge-skills did not write ${path}`)
+      }
+    } finally {
+      await rm(world.root, { recursive: true, force: true })
+      await rm(fixture.sparseRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('does not trip on an ordinary pull with a couple of deletions', async () => {
+    const world = await buildWorld()
+    try {
+      const state = new StateStore(world.config.stateDir)
+      await state.writeUserConfig({ repoUrl: world.remoteDir, gitName: 'T', gitEmail: 't@e.com' })
+      const engine = new SyncEngine({ config: world.config, state })
+      await engine.push({})
+
+      // Add two local-only files: well under the max(8, 50%) floor.
+      await writeFile(join(world.dshHome, 'gongfeng-mr', 'extra-a.json'), '{"a":1}\n')
+      await writeFile(join(world.dshHome, 'gongfeng-mr', 'extra-b.json'), '{"b":2}\n')
+
+      const result = await engine.pull({ mode: 'overwrite' })
+      assert.equal(result.removed, 2, 'a small, deliberate deletion still goes through')
+      assert.ok(result.files > 0)
     } finally {
       await rm(world.root, { recursive: true, force: true })
     }
@@ -727,6 +943,216 @@ describe('automatic plugin install', () => {
       assert.ok(pulled.backedUpTo !== null)
       const after = JSON.parse(await readFile(join(world.profileDir, 'package.json'), 'utf8'))
       assert.equal(after.dependencies['tiny-plugin'], `file:${pluginDir}`)
+    } finally {
+      await rm(world.root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('uninstalled bundles after a pull', () => {
+  /**
+   * Give the world a profile that declares one portable plugin bundle, and make
+   * sure it is NOT present in `node_modules` — the "restored config, missing
+   * package" shape this feature exists for.
+   *
+   * @param {object} world - A `buildWorld()` result.
+   * @returns {Promise<object>} The engine and the bundle name.
+   */
+  async function declareUninstalledBundle(world) {
+    const name = 'ghost-plugin'
+    await writeFile(join(world.profileDir, 'package.json'), `${JSON.stringify({
+      name: 'dsh-profile-test',
+      dependencies: { [name]: '^1.0.0' },
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', name] } },
+    }, null, 2)}\n`)
+    const state = new StateStore(world.config.stateDir)
+    await state.writeUserConfig({ repoUrl: world.remoteDir, gitName: 'T', gitEmail: 't@e.com' })
+    const engine = new SyncEngine({ config: world.config, state })
+    await engine.push({})
+    await rm(join(world.profileDir, 'node_modules'), { recursive: true, force: true })
+    return { engine, state }
+  }
+
+  it('reports bundles the snapshot declares but this machine never installed', async () => {
+    const world = await buildWorld()
+    try {
+      const { engine, state } = await declareUninstalledBundle(world)
+      // autoInstall off: the restore writes package.json, installs nothing.
+      await state.writeUserConfig({ autoInstall: false })
+      const pulled = await engine.pull({ mode: 'overwrite' })
+
+      assert.deepEqual(pulled.uninstalledBundles, ['ghost-plugin'],
+        'the declared-but-absent bundle is reported')
+      // The inbox bundles resolve from the dsh installation, so they must never
+      // appear here even though node_modules has none of them.
+      assert.ok(!pulled.uninstalledBundles.includes('@deepseek-ai/dsh-base'),
+        'in-box bundles are not "uninstalled"')
+      assert.equal(pulled.installFailed, false, 'user-disabled install is not a failure')
+      assert.match(pulled.summary, /1 个插件未安装（重启后会失效）：ghost-plugin/)
+    } finally {
+      await rm(world.root, { recursive: true, force: true })
+    }
+  })
+
+  it('reports them when the install itself failed, and carries the reason', async () => {
+    const world = await buildWorld()
+    try {
+      const { state } = await declareUninstalledBundle(world)
+      // A packageManager stand-in that always fails, like a 401 from a private
+      // registry. No network: /bin/sh exits 1 with a diagnostic on stderr.
+      const failing = new SyncEngine({
+        config: world.config,
+        state,
+        profileContext: {
+          packageManager: { command: '/bin/sh', args: ['-c', 'echo "ERR_PNPM_FETCH_401 Unauthorized" >&2; exit 1'], env: {} },
+        },
+      })
+      const pulled = await failing.pull({ mode: 'overwrite' })
+
+      assert.deepEqual(pulled.uninstalledBundles, ['ghost-plugin'])
+      assert.equal(pulled.installFailed, true, 'a non-zero install is a failure')
+      assert.equal(pulled.install.ok, false)
+      assert.match(pulled.install.message, /401/)
+      assert.match(pulled.summary, /插件安装失败/)
+      assert.match(pulled.summary, /插件未安装/)
+    } finally {
+      await rm(world.root, { recursive: true, force: true })
+    }
+  })
+
+  it('says nothing when every declared bundle really is installed', async () => {
+    const world = await buildWorld()
+    try {
+      const { engine, state } = await declareUninstalledBundle(world)
+      // Put the package on disk, which is the state a successful install leaves.
+      const pkgDir = join(world.profileDir, 'node_modules', 'ghost-plugin')
+      await mkdir(pkgDir, { recursive: true })
+      await writeFile(join(pkgDir, 'package.json'), `${JSON.stringify({ name: 'ghost-plugin', version: '1.0.0' })}\n`)
+      // autoInstall off so nothing can remove it again during the pull.
+      await state.writeUserConfig({ autoInstall: false })
+
+      const pulled = await engine.pull({ mode: 'overwrite' })
+      assert.deepEqual(pulled.uninstalledBundles, [], 'a fully installed profile reports nothing')
+      assert.ok(!pulled.summary.includes('未安装'), `no false alarm in summary: ${pulled.summary}`)
+    } finally {
+      await rm(world.root, { recursive: true, force: true })
+    }
+  })
+
+  it('missingBundles ignores bundles that were never profile dependencies', () => {
+    const inboxOnly = {
+      dependencies: {},
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'] } },
+    }
+    assert.deepEqual(missingBundles(inboxOnly, []), [],
+      'in-box bundles resolve from the dsh installation')
+
+    const withDep = {
+      dependencies: { 'ghost-plugin': '^1.0.0' },
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', 'ghost-plugin'] } },
+    }
+    assert.deepEqual(missingBundles(withDep, []), ['ghost-plugin'])
+    assert.deepEqual(missingBundles(withDep, ['ghost-plugin']), [])
+    // Degenerate inputs.
+    assert.deepEqual(missingBundles(undefined, []), [])
+    assert.deepEqual(missingBundles({ dsh: { profile: { bundles: [] } } }, []), [])
+  })
+})
+
+describe('needsRestart detection after a pull', () => {
+  /** A fake `pnpm` that "installs" nothing but exits 0, so no network is touched. */
+  const NOOP_PM = { command: '/bin/true', args: [], env: {} }
+
+  it('reports needsRestart when a restored bundle becomes loadable', async () => {
+    const world = await buildWorld()
+    try {
+      const state = new StateStore(world.config.stateDir)
+      await state.writeUserConfig({ repoUrl: world.remoteDir, gitName: 'T', gitEmail: 't@e.com' })
+
+      // The snapshot declares a plugin that is NOT in node_modules on this
+      // machine — the "restored config, missing package" case, which is exactly
+      // the one that used to leave a plugin silently unloaded.
+      await writeFile(join(world.profileDir, 'package.json'), `${JSON.stringify({
+        name: 'dsh-profile-test',
+        dependencies: { 'fresh-plugin': '^1.0.0' },
+        dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', 'fresh-plugin'] } },
+      }, null, 2)}\n`)
+      const engine = new SyncEngine({ config: world.config, state })
+      await engine.push({})
+      await rm(join(world.profileDir, 'node_modules'), { recursive: true, force: true })
+
+      // A stand-in for pnpm that only creates the package directory in
+      // node_modules — no network, no registry, and deterministic offline.
+      // This is what makes "the install made it loadable" observable.
+      const fakePm = join(world.root, 'fake-pnpm.mjs')
+      await writeFile(fakePm, [
+        "import { mkdir, writeFile } from 'node:fs/promises'",
+        "import { join } from 'node:path'",
+        "const dir = join(process.cwd(), 'node_modules', 'fresh-plugin')",
+        "await mkdir(dir, { recursive: true })",
+        "await writeFile(join(dir, 'package.json'), JSON.stringify({ name: 'fresh-plugin', version: '1.0.0' }))",
+        "console.log('Done in 1ms')",
+        '',
+      ].join('\n'))
+
+      const installing = new SyncEngine({
+        config: world.config,
+        state,
+        profileContext: { packageManager: { command: process.execPath, args: [fakePm], env: {} } },
+      })
+
+      const pulled = await installing.pull({ mode: 'overwrite' })
+      assert.equal(pulled.needsRestart, true, 'a newly loadable bundle requires a restart')
+      assert.deepEqual(pulled.newBundles, ['fresh-plugin'])
+      // The user-facing summary must say it, not just the boolean.
+      assert.match(pulled.summary, /需要重启/)
+      assert.match(pulled.summary, /插件已安装/)
+    } finally {
+      await rm(world.root, { recursive: true, force: true })
+    }
+  })
+
+  it('activeBundles is the intersection of declared and installed', () => {
+    const manifest = {
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', 'dsh-alpha', 'dsh-beta'] } },
+    }
+    // Everything installed.
+    assert.deepEqual(activeBundles(manifest, ['@deepseek-ai/dsh-base', 'dsh-alpha', 'dsh-beta', 'unrelated']),
+      ['@deepseek-ai/dsh-base', 'dsh-alpha', 'dsh-beta'])
+    // dsh-beta declared but absent from node_modules: the launcher cannot compose it.
+    assert.deepEqual(activeBundles(manifest, ['@deepseek-ai/dsh-base', 'dsh-alpha']),
+      ['@deepseek-ai/dsh-base', 'dsh-alpha'])
+    // A machine with nothing installed loads nothing from the profile layer.
+    assert.deepEqual(activeBundles(manifest, []), [])
+    // Degenerate inputs never throw.
+    assert.deepEqual(activeBundles(undefined, ['x']), [])
+    assert.deepEqual(activeBundles({ dsh: { profile: {} } }, ['x']), [])
+    assert.deepEqual(activeBundles({ dsh: { profile: { bundles: 'not-an-array' } } }, ['x']), [])
+  })
+
+  it('a bundle present before and after is not a new one', () => {
+    // Mirrors the pull-side diff: only names absent from the "before" set count.
+    const before = activeBundles({ dsh: { profile: { bundles: ['a', 'b'] } } }, ['a', 'b'])
+    const after = activeBundles({ dsh: { profile: { bundles: ['a', 'b', 'c'] } } }, ['a', 'b', 'c'])
+    const known = new Set(before)
+    assert.deepEqual(after.filter((name) => !known.has(name)), ['c'])
+  })
+
+  it('a pull that installs nothing new reports needsRestart false', async () => {
+    const world = await buildWorld()
+    try {
+      const state = new StateStore(world.config.stateDir)
+      await state.writeUserConfig({ repoUrl: world.remoteDir, gitName: 'T', gitEmail: 't@e.com' })
+      // No packages installed at all, and no bundle becomes loadable.
+      await rm(join(world.profileDir, 'node_modules'), { recursive: true, force: true })
+
+      const engine = new SyncEngine({ config: world.config, state, profileContext: { packageManager: NOOP_PM } })
+      await engine.push({})
+      const pulled = await engine.pull({ mode: 'overwrite' })
+      assert.equal(pulled.needsRestart, false)
+      assert.deepEqual(pulled.newBundles, [])
+      // The summary must not claim a restart that is not needed.
+      assert.ok(!pulled.summary.includes('需要重启'), `unexpected restart note: ${pulled.summary}`)
     } finally {
       await rm(world.root, { recursive: true, force: true })
     }

@@ -95,6 +95,10 @@ window.__ModuleLoader__.load({
         'action.pull': '从远程恢复',
         'action.pulling': '恢复中…',
         'action.pullConfirm': '确认覆盖本地？',
+        'pull.guardTitle': '这次恢复会删掉本机大部分设置',
+        'pull.guardHint': '远端快照里的文件比本机少很多，用远端覆盖会把多出来的本机设置删掉。',
+        'action.forcePull': '我了解，强制恢复',
+        'action.forcePulling': '强制恢复中…',
         'action.cancel': '取消',
         'action.restore': '恢复',
         'action.restoring': '恢复中…',
@@ -102,6 +106,19 @@ window.__ModuleLoader__.load({
         'notice.repoCreated': '私有仓库已创建并保存，可以直接上传了。',
         'notice.pushed': '已上传 {files} 个文件（{commit}）。',
         'notice.pulled': '已恢复 {files} 个文件（{commit}），旧配置备份在 {backup}。',
+        'notice.needsRestart': '已恢复 {files} 个文件（{commit}），其中 {count} 个插件是新装的：请重启 DSH 后才会加载。',
+        'restart.title': '需要重启 DSH',
+        'restart.body': '这次恢复装上了 {count} 个新插件，但当前运行的 DSH 是在启动时按插件列表加载的，不会自动看到它们。',
+        'restart.list': '重启后生效：{names}',
+        'notice.uninstalled': '已恢复 {files} 个文件（{commit}），但 {count} 个插件没有装上：{names}。',
+        'missing.title': '{count} 个插件没有装上',
+        'missing.body': '这些插件已经写进 profile 配置，但本机没有对应的包。现在重启 DSH，它们会启动失败并一直不生效。',
+        'missing.list': '缺少的插件：{names}',
+        'missing.autoInstallOff': '「自动同步」里关掉了自动安装，所以这次没有安装插件。打开「自动安装插件」后再恢复一次即可。',
+        'missing.installFailed': '自动安装失败了：{message}',
+        'missing.manual': '可以在 profile 目录手动执行 pnpm install 补救：',
+        'missing.command': 'cd <profile 目录> && pnpm install',
+        'restart.hint': '退出 DSH 再重新打开即可（桌面端 Cmd+Q 后重开）。',
         'notice.recovered': '已恢复到 {label}。',
         'notice.testOk': 'git {version} 可用。',
         'notice.testFailed': 'git 不可用',
@@ -206,6 +223,10 @@ window.__ModuleLoader__.load({
         'action.pull': 'Pull from remote',
         'action.pulling': 'Pulling…',
         'action.pullConfirm': 'Overwrite local config?',
+        'pull.guardTitle': 'This restore would delete most of your local settings',
+        'pull.guardHint': 'The remote snapshot holds far fewer files than this machine, so an overwrite would delete the extras.',
+        'action.forcePull': 'Understood, force restore',
+        'action.forcePulling': 'Force restoring…',
         'action.cancel': 'Cancel',
         'action.restore': 'Restore',
         'action.restoring': 'Restoring…',
@@ -213,6 +234,19 @@ window.__ModuleLoader__.load({
         'notice.repoCreated': 'Private repository created and saved — ready to push.',
         'notice.pushed': 'Uploaded {files} files ({commit}).',
         'notice.pulled': 'Restored {files} files ({commit}); the previous config was backed up to {backup}.',
+        'notice.needsRestart': 'Restored {files} files ({commit}), {count} of them newly installed: restart DSH for them to load.',
+        'restart.title': 'Restart DSH required',
+        'restart.body': 'This restore installed {count} new plugins, but the running DSH composed its plugin list at startup and will not pick them up on its own.',
+        'restart.list': 'Activates after a restart: {names}',
+        'notice.uninstalled': 'Restored {files} files ({commit}), but {count} plugins could not be installed: {names}.',
+        'missing.title': '{count} plugins could not be installed',
+        'missing.body': 'These plugins are written into the profile config, but their packages are not on this machine. If you restart DSH now they fail to load and stay inactive.',
+        'missing.list': 'Missing plugins: {names}',
+        'missing.autoInstallOff': 'Automatic plugin install is off in "Automatic sync", so nothing was installed. Turn it on and restore again.',
+        'missing.installFailed': 'The automatic install failed: {message}',
+        'missing.manual': 'You can recover by running pnpm install in the profile directory:',
+        'missing.command': 'cd <profile directory> && pnpm install',
+        'restart.hint': 'Quit DSH and open it again (Cmd+Q on macOS).',
         'notice.recovered': 'Restored {label}.',
         'notice.testOk': 'git {version} is available.',
         'notice.testFailed': 'git is not usable',
@@ -311,6 +345,7 @@ window.__ModuleLoader__.load({
 .dss-notice { padding: 8px 10px; font-size: 11.5px; line-height: 1.65; border-radius: 7px; overflow-wrap: anywhere; border: 1px solid var(--dsw-alias-border-l2); color: var(--dsw-alias-label-secondary); background: var(--dsw-alias-bg-layer-1); }
 .dss-notice[data-tone="ok"] { color: var(--dsw-alias-state-success-primary); border-color: var(--dsw-alias-state-success-primary); }
 .dss-notice[data-tone="error"] { color: var(--dsw-alias-state-error-primary); border-color: var(--dsw-alias-state-error-primary); }
+.dss-notice[data-tone="warn"] { color: var(--dsw-alias-state-warn-primary); border-color: var(--dsw-alias-state-warn-primary); }
 .dss-section { padding: 16px 0; border-bottom: 1px solid var(--dsw-alias-border-l1); }
 .dss-section:first-child { padding-top: 4px; }
 .dss-section:last-child { border-bottom: 0; padding-bottom: 4px; }
@@ -372,6 +407,20 @@ window.__ModuleLoader__.load({
 .dss-switch[data-on="true"] { background: var(--dsw-alias-brand-primary); border-color: var(--dsw-alias-brand-primary); }
 .dss-switch[data-on="true"]::after { transform: translateX(15px); background: var(--dsw-alias-bg-base); }
 .dss-switch:disabled { opacity: .5; cursor: default; }
+.dss-missing { display: flex; flex-direction: column; gap: 4px; margin-top: 12px; padding: 12px 14px; border-radius: 8px; border: 1px solid var(--dsw-alias-state-warn-primary); }
+.dss-missing strong { font-size: 12px; font-weight: 600; color: var(--dsw-alias-state-warn-primary); }
+.dss-missing p { margin: 0; font-size: 11.5px; line-height: 1.75; color: var(--dsw-alias-label-secondary); overflow-wrap: anywhere; }
+.dss-missing-list { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px !important; color: var(--dsw-alias-label-primary) !important; }
+.dss-missing-cmd { margin: 2px 0 0; padding: 6px 9px; border-radius: 6px; background: var(--dsw-alias-bg-layer-2); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: var(--dsw-alias-label-primary); overflow-x: auto; }
+.dss-restart { display: flex; flex-direction: column; gap: 4px; margin-top: 12px; padding: 12px 14px; border-radius: 8px; border: 1px solid var(--dsw-alias-state-success-primary); }
+.dss-restart strong { font-size: 12px; font-weight: 600; color: var(--dsw-alias-state-success-primary); }
+.dss-restart p { margin: 0; font-size: 11.5px; line-height: 1.75; color: var(--dsw-alias-label-secondary); overflow-wrap: anywhere; }
+.dss-restart-list { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px !important; color: var(--dsw-alias-label-primary) !important; }
+.dss-restart-hint { color: var(--dsw-alias-label-secondary); }
+.dss-guard { display: flex; flex-direction: column; gap: 4px; margin-top: 12px; padding: 12px 14px; border-radius: 8px; border: 1px solid var(--dsw-alias-state-error-primary); }
+.dss-guard strong { font-size: 12px; font-weight: 600; color: var(--dsw-alias-state-error-primary); }
+.dss-guard p { margin: 0; font-size: 11.5px; line-height: 1.75; color: var(--dsw-alias-label-secondary); overflow-wrap: anywhere; }
+.dss-guard .dss-actions { margin-top: 6px; }
 .dss-safety { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border-radius: 8px; border: 1px solid var(--dsw-alias-state-warn-primary); }
 .dss-safety p { margin: 0; font-size: 11.5px; line-height: 1.75; color: var(--dsw-alias-label-secondary); overflow-wrap: anywhere; }
 .dss-safety strong { display: block; margin-bottom: 2px; font-size: 12px; font-weight: 600; color: var(--dsw-alias-state-warn-primary); }
@@ -915,7 +964,7 @@ window.__ModuleLoader__.load({
       return h('div', {
         className: 'dss-notice',
         'data-tone': tone,
-        role: tone === 'error' ? 'alert' : undefined,
+        role: tone === 'error' || tone === 'warn' ? 'alert' : undefined,
       }, notice.text)
     }
 
@@ -1053,10 +1102,25 @@ window.__ModuleLoader__.load({
      * @returns {object} Section element.
      */
     function SyncSection(page) {
-      const { t, data, busy, hostBusy, actions, diff, diffOpen, setDiffOpen, pullArmed, setPullArmed } = page
+      const { t, data, busy, hostBusy, actions, diff, diffOpen, setDiffOpen, pullArmed, setPullArmed, notice } = page
       const snapshot = data?.snapshot ?? {}
       const lastRun = formatLastRun(data?.lastRun, t)
       const blocked = busy !== null || hostBusy !== null
+      // The Host refused an overwrite pull because it would have deleted most of
+      // this machine's settings. That is the only failure with a recovery, so the
+      // page offers the escape hatch right where the pull button lives.
+      const guarded = notice?.code === 'mass-deletion-on-pull'
+      // A pull that installed bundles this process never mounted: the config is
+      // restored and correct, but the plugins only load after a restart.
+      const needsRestart = notice?.code === 'needs-restart'
+      const newBundles = Array.isArray(notice?.newBundles) ? notice.newBundles : []
+      // The snapshot declares plugins whose packages never landed. Higher
+      // priority than the restart advice: a restart would only turn these into
+      // startup failures, so the fix has to come first.
+      const uninstalled = notice?.code === 'uninstalled-bundles'
+        ? (Array.isArray(notice.uninstalledBundles) ? notice.uninstalledBundles : [])
+        : []
+      const missingMessage = typeof notice?.installMessage === 'string' ? notice.installMessage : null
 
       return h(Section, { title: t('section.sync.title'), hint: t('section.sync.hint') },
         h('div', { className: 'dss-chips' },
@@ -1076,6 +1140,41 @@ window.__ModuleLoader__.load({
               }, busy === 'pull' ? t('action.pulling') : t('action.pullConfirm')),
               h(Button, { variant: 'ghost', disabled: busy !== null, onClick: () => setPullArmed(false) }, t('action.cancel')))
             : h(Button, { disabled: blocked, onClick: () => setPullArmed(true) }, t('action.pull'))),
+        guarded
+          ? h('div', { className: 'dss-guard', role: 'alert' },
+            h('strong', null, t('pull.guardTitle')),
+            h('p', null, t('pull.guardHint')),
+            h('p', null, notice.text),
+            h('div', { className: 'dss-actions' },
+              h(Button, {
+                variant: 'danger',
+                disabled: busy !== null || hostBusy !== null,
+                onClick: () => actions.pull(true),
+              }, busy === 'force-pull' ? t('action.forcePulling') : t('action.forcePull'))))
+          : null,
+        needsRestart
+          ? h('div', { className: 'dss-restart', role: 'status' },
+            h('strong', null, t('restart.title')),
+            h('p', null, t('restart.body', { count: newBundles.length })),
+            newBundles.length === 0
+              ? null
+              : h('p', { className: 'dss-restart-list' }, t('restart.list', { names: newBundles.join(', ') })),
+            h('p', { className: 'dss-restart-hint' }, t('restart.hint')))
+          : null,
+        uninstalled.length > 0
+          ? h('div', { className: 'dss-missing', role: 'alert' },
+            h('strong', null, t('missing.title', { count: uninstalled.length })),
+            h('p', null, t('missing.body')),
+            h('p', { className: 'dss-missing-list' }, t('missing.list', { names: uninstalled.join(', ') })),
+            notice?.autoInstallOff === true
+              ? h('p', null, t('missing.autoInstallOff'))
+              : h('p', null, t('missing.installFailed', { message: missingMessage ?? '—' })),
+            notice?.autoInstallOff === true
+              ? null
+              : h(React.Fragment, null,
+                h('p', null, t('missing.manual')),
+                h('pre', { className: 'dss-missing-cmd' }, t('missing.command'))))
+          : null,
         hostBusy === null
           ? null
           : h('div', { className: 'dss-meta' }, t('sync.hostBusy', { operation: hostBusy })),
@@ -1284,7 +1383,10 @@ window.__ModuleLoader__.load({
         try {
           return await action()
         } catch (error) {
-          setNotice({ tone: 'error', text: error?.message ?? String(error) })
+          // The error's `code` rides along so the page can offer a recovery for
+          // the one failure that has one (`mass-deletion-on-pull`); every other
+          // failure is just the message.
+          setNotice({ tone: 'error', text: error?.message ?? String(error), code: error?.code ?? null })
           return null
         } finally {
           setBusy(null)
@@ -1355,20 +1457,59 @@ window.__ModuleLoader__.load({
         })
       }), [run, store, diff, t])
 
-      /** Pull the remote over local config. The Host writes the restore point. */
-      const pull = React.useCallback(() => run('pull', async () => {
-        const payload = await call('POST', '/pull', { mode: 'overwrite' })
+      /**
+       * Pull the remote over local config. The Host writes the restore point.
+       *
+       * `force` re-sends the same overwrite pull with the Host's mass-deletion
+       * guard switched off. It is only reachable from the guard's own failure,
+       * so the user has already read how many files would go.
+       *
+       * @param {boolean} force - Bypass the Host's mass-deletion guard.
+       */
+      const pull = React.useCallback((force) => run(force === true ? 'force-pull' : 'pull', async () => {
+        const body = force === true ? { mode: 'overwrite', force: true } : { mode: 'overwrite' }
+        const payload = await call('POST', '/pull', body)
         const result = payload?.result ?? {}
         store.refresh()
         diff.reload()
         recoveries.reload()
+        const newBundles = Array.isArray(result.newBundles) ? result.newBundles : []
+        const uninstalled = Array.isArray(result.uninstalledBundles) ? result.uninstalledBundles : []
+        // Two different follow-ups ride the same notice channel:
+        //
+        //   - `needs-restart` — the install worked; the plugins only need a
+        //     restart to load. A success with an action.
+        //   - `uninstalled-bundles` — the config declares plugins whose packages
+        //     never landed. Restarting now would make them fail to load, so this
+        //     takes precedence over the restart advice: it is a problem to fix
+        //     first, not a step to perform.
+        const missing = uninstalled.length > 0
         setNotice({
-          tone: 'ok',
-          text: t('notice.pulled', {
-            files: result.files ?? 0,
-            commit: shortHash(result.commit),
-            backup: String(result.backedUpTo ?? '—'),
-          }),
+          tone: missing ? 'warn' : 'ok',
+          code: missing ? 'uninstalled-bundles' : result.needsRestart === true ? 'needs-restart' : null,
+          text: missing
+            ? t('notice.uninstalled', {
+              files: result.files ?? 0,
+              commit: shortHash(result.commit),
+              count: uninstalled.length,
+              names: uninstalled.slice(0, 5).join(', '),
+            })
+            : result.needsRestart === true
+              ? t('notice.needsRestart', {
+                files: result.files ?? 0,
+                commit: shortHash(result.commit),
+                count: newBundles.length,
+              })
+              : t('notice.pulled', {
+                files: result.files ?? 0,
+                commit: shortHash(result.commit),
+                backup: String(result.backedUpTo ?? '—'),
+              }),
+          newBundles,
+          uninstalledBundles: uninstalled,
+          installFailed: result.installFailed === true,
+          installMessage: typeof result.install?.message === 'string' ? result.install.message : null,
+          autoInstallOff: result.install === null,
         })
       }), [run, store, diff, recoveries, t])
 
@@ -1447,6 +1588,7 @@ window.__ModuleLoader__.load({
         draft,
         setDraft,
         busy: channel.busy,
+        notice: channel.notice,
         actions,
         diff,
         diffOpen,
