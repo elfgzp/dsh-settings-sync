@@ -813,6 +813,102 @@ describe('cross-machine profile manifest merge', () => {
   })
 })
 
+describe('non-directory path specs never reach git', () => {
+  /** Build a scratch dir with a real tarball-shaped file in it. */
+  async function buildScratch() {
+    const root = await mkdtemp(join(tmpdir(), 'tgz-'))
+    const profileDir = join(root, 'profile')
+    await mkdir(profileDir, { recursive: true })
+    const tarball = join(root, 'plugin-1.0.0.tgz')
+    await writeFile(tarball, 'not really a tarball, but a regular file\n')
+    const repoDir = join(root, 'repo')
+    await mkdir(repoDir, { recursive: true })
+    await writeFile(join(repoDir, 'package.json'), '{"name":"repo-pkg","version":"1.0.0"}\n')
+    await git(repoDir, 'init', '-q')
+    await git(repoDir, 'remote', 'add', 'origin', 'https://github.com/elfgzp/repo-pkg.git')
+    return { root, profileDir, tarball, repoDir }
+  }
+
+  it('treats a file: tarball as local-only instead of spawning git in it', async () => {
+    // The devcloud crash: `file:` names a packed artifact, not a working tree.
+    // `execFile` with that file as `cwd` throws ENOTDIR **synchronously**, so the
+    // child-process error callback never runs and the throw escapes the helper.
+    const scratch = await buildScratch()
+    try {
+      const { resolveDependencySpec } = await import('../lib/plugins.js')
+      const outcome = await resolveDependencySpec('dsh-x', `file:${scratch.tarball}`, scratch.profileDir)
+      assert.equal(outcome.portable, false)
+      assert.equal(outcome.source, 'local-only')
+      // The original spec is preserved verbatim: it still installs here.
+      assert.equal(outcome.spec, `file:${scratch.tarball}`)
+    } finally {
+      await rm(scratch.root, { recursive: true, force: true })
+    }
+  })
+
+  it('treats a tarball spec as local-only through makePortableManifest', async () => {
+    const scratch = await buildScratch()
+    try {
+      const { makePortableManifest } = await import('../lib/plugins.js')
+      const result = await makePortableManifest({
+        profileDir: scratch.profileDir,
+        manifest: { name: 'p', dependencies: { 'dsh-x': `file:${scratch.tarball}` } },
+      })
+      assert.deepEqual(result.localOnly, ['dsh-x'])
+      assert.deepEqual(result.resolved, {}, 'a tarball is never reported as resolved to a URL')
+      // Untouched in the snapshot: the machine that has the file can still build.
+      assert.equal(result.manifest.dependencies['dsh-x'], `file:${scratch.tarball}`)
+    } finally {
+      await rm(scratch.root, { recursive: true, force: true })
+    }
+  })
+
+  it('treats a path that does not exist as local-only without throwing', async () => {
+    const scratch = await buildScratch()
+    try {
+      const { resolveDependencySpec } = await import('../lib/plugins.js')
+      for (const spec of [
+        'file:/nonexistent/nope-1.0.0.tgz',
+        'link:/nonexistent/directory',
+      ]) {
+        const outcome = await resolveDependencySpec('dsh-x', spec, scratch.profileDir)
+        assert.equal(outcome.portable, false, spec)
+        assert.equal(outcome.source, 'local-only', spec)
+      }
+    } finally {
+      await rm(scratch.root, { recursive: true, force: true })
+    }
+  })
+
+  it('still turns a link: directory with a git remote into an installable URL', async () => {
+    // The regression guard: the tarball fix must not disable portability.
+    const scratch = await buildScratch()
+    try {
+      const { resolveDependencySpec, makePortableManifest } = await import('../lib/plugins.js')
+      const outcome = await resolveDependencySpec('dsh-repo', `link:${scratch.repoDir}`, scratch.profileDir)
+      assert.equal(outcome.portable, true)
+      assert.equal(outcome.source, 'git-remote')
+      assert.equal(outcome.spec, 'github:elfgzp/repo-pkg')
+
+      // Both kinds side by side in one manifest: each is handled on its own.
+      const result = await makePortableManifest({
+        profileDir: scratch.profileDir,
+        manifest: {
+          name: 'p',
+          dependencies: {
+            'dsh-repo': `link:${scratch.repoDir}`,
+            'dsh-x': `file:${scratch.tarball}`,
+          },
+        },
+      })
+      assert.deepEqual(result.resolved, { 'dsh-repo': 'github:elfgzp/repo-pkg' })
+      assert.deepEqual(result.localOnly, ['dsh-x'])
+    } finally {
+      await rm(scratch.root, { recursive: true, force: true })
+    }
+  })
+})
+
 describe('portable manifest result shape', () => {
   /**
    * Every `makePortableManifest` return value must carry the same diagnostics.
